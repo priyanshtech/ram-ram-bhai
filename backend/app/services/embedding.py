@@ -8,6 +8,13 @@ from app.core.config import settings
 # Dimensions mapped dynamically from settings
 VECTOR_DIM = settings.EMBEDDING_DIMENSIONS
 
+class EmbeddingUnavailable(RuntimeError):
+    """The embedding provider cannot serve this request."""
+
+    def __init__(self, status_code: int | None = None):
+        self.status_code = status_code
+        super().__init__(f"Embedding service unavailable (HTTP {status_code})" if status_code else "Embedding service is not configured")
+
 async def get_text_embedding(text: str) -> list[float]:
     """Returns vector embedding list for a text input."""
     if settings.DEVELOPMENT_MOCK_AI:
@@ -18,7 +25,7 @@ async def get_text_embedding(text: str) -> list[float]:
         return list(np.random.rand(VECTOR_DIM).astype(float))
         
     if not settings.OPENROUTER_API_KEY:
-        raise ValueError("OPENROUTER_API_KEY is not set.")
+        raise EmbeddingUnavailable()
         
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
@@ -36,4 +43,4 @@ async def get_text_embedding(text: str) -> list[float]:
                 raise ValueError(f"Embedding dimension mismatch! Model returned {len(embedding)} but config requires {VECTOR_DIM}.")
             return embedding
         else:
-            raise Exception(f"Failed to get embedding: {resp.text}")
+            raise EmbeddingUnavailable(resp.status_code)

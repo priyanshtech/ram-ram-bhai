@@ -24,6 +24,7 @@ class DashboardOverviewResponse(BaseModel):
     avg_response_time_seconds: float
     product_enquiries: int
 class ConversationResponse(BaseModel):
+    channel: str = "widget"
     id: str
     bot_id: str
     visitor_session_id: str

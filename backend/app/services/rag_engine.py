@@ -1,8 +1,14 @@
 import json
+import logging
+import math
+import re
+import time
 import urllib.parse
+from collections import Counter
 from collections.abc import AsyncGenerator
 
 import httpx
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +21,75 @@ from app.models.models import (
     Message,
     UsageEvent,
 )
-from app.services.embedding import get_text_embedding
+from app.services.embedding import EmbeddingUnavailable, get_text_embedding
+from app.services.gemini import stream_gemini_reply
+
+logger = logging.getLogger(__name__)
+embedding_retry_at = 0.0
+
+SEARCH_STOP_WORDS = frozenset("""
+a an and are as at be by can could do does for from have how i in is it me my
+of on or our please that the their this to us was we what when where which who
+will with would you your want need looking buy know tell about
+""".split())
+
+
+def search_terms(text: str) -> list[str]:
+    terms = []
+    for word in re.findall(r"[^\W_]+", text.casefold()):
+        if word in SEARCH_STOP_WORDS:
+            continue
+        # Match simple singular/plural product names without changing stored vectors.
+        if word.isascii() and word.isalpha():
+            if len(word) > 4 and word.endswith("ies"):
+                word = word[:-3] + "y"
+            elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+                word = word[:-1]
+        terms.append(word)
+    return terms
+
+
+async def retrieve_keyword_chunks(
+    db: AsyncSession, tenant_id: str, bot_id: str, query: str, top_k: int,
+) -> list[tuple[DocumentChunk, KnowledgeSource, float]]:
+    """Search stored knowledge text when the embedding provider is unavailable."""
+    terms = set(search_terms(query))
+    if not terms:
+        return []
+    rows = (await db.execute(
+        select(DocumentChunk, KnowledgeSource)
+        .join(KnowledgeSource, DocumentChunk.knowledge_source_id == KnowledgeSource.id)
+        .where(
+            DocumentChunk.tenant_id == tenant_id, DocumentChunk.bot_id == bot_id,
+            KnowledgeSource.tenant_id == tenant_id, KnowledgeSource.bot_id == bot_id,
+            KnowledgeSource.status == "ready",
+        )
+    )).all()
+    documents = [(chunk, source, Counter(search_terms(chunk.text_content))) for chunk, source in rows]
+    if not documents:
+        return []
+    average_length = sum(sum(counts.values()) for _, _, counts in documents) / len(documents) or 1
+    idf = {
+        term: math.log(1 + (len(documents) - count + 0.5) / (count + 0.5))
+        for term in terms
+        for count in [sum(term in counts for _, _, counts in documents)]
+    }
+    ranked = []
+    for chunk, source, counts in documents:
+        matched = terms.intersection(counts)
+        if not matched:
+            continue
+        length = sum(counts.values())
+        relevance = sum(
+            idf[term] * (counts[term] * 2.5) /
+            (counts[term] + 1.5 * (0.25 + 0.75 * length / average_length))
+            for term in matched
+        )
+        # Term coverage provides a 0..1 grounding score; BM25 orders matching passages.
+        coverage = len(matched) / len(terms)
+        ranked.append((relevance, chunk, source, coverage))
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    return [(chunk, source, coverage) for _, chunk, source, coverage in ranked[:top_k]]
 
 PERMANENT_SYSTEM_PROMPT = """You are a professional customer-sales assistant for any business.
 
@@ -64,6 +138,28 @@ Assistant: Yes. Please share your mobile or WhatsApp number, and our sales team 
 
 If the customer asks something outside sales, reply briefly:
 “I’ll connect you with the right team. May I have your WhatsApp number?”"""
+def build_system_prompt(bot: Bot, context: str) -> str:
+    instructions = bot.system_prompt or PERMANENT_SYSTEM_PROMPT
+    for label, value in (
+        ("Sales instructions", bot.sales_instructions),
+        ("Response length", bot.response_length_limit),
+        ("Lead qualification", bot.lead_qualification_questions),
+        ("Human handoff rules", bot.human_handoff_rules),
+        ("Business hours", bot.business_hours),
+        ("Primary language", bot.primary_language),
+    ):
+        if value:
+            instructions += f"\n{label}: {value}"
+    return (
+        f"{instructions}\n\nSTRICT GROUNDING RULES:\n"
+        "Answer factual product/service questions only using the Context below.\n"
+        "If the Context does not contain the answer, say you don't have enough verified information "
+        "and offer human support. Never invent facts, pricing or policies.\n"
+        "For greetings and conversational replies, continue naturally using conversation history.\n\n"
+        f"Context:\n{context}"
+    )
+
+
 async def retrieve_relevant_chunks(
     db: AsyncSession,
     tenant_id: str,
@@ -71,9 +167,42 @@ async def retrieve_relevant_chunks(
     query_text: str,
     top_k: int = 4
 ) -> list[tuple[DocumentChunk, KnowledgeSource, float]]:
-    """Retrieves top-K most relevant chunks strictly using pgvector cosine distance, scoped to tenant."""
-    query_vec = await get_text_embedding(query_text)
+    """Retrieves top-K chunks by cosine similarity, scoped to the tenant and bot."""
+    global embedding_retry_at
+    has_knowledge = await db.scalar(
+        select(DocumentChunk.id).where(
+            DocumentChunk.bot_id == bot_id, DocumentChunk.tenant_id == tenant_id,
+        ).limit(1)
+    )
+    if not has_knowledge or not search_terms(query_text):
+        return []
+    if time.monotonic() < embedding_retry_at:
+        return await retrieve_keyword_chunks(db, tenant_id, bot_id, query_text, top_k)
+    try:
+        query_vec = await get_text_embedding(query_text)
+    except (EmbeddingUnavailable, httpx.HTTPError) as error:
+        status = getattr(error, "status_code", None)
+        # Avoid repeatedly calling a throttled/down provider for every incoming message.
+        embedding_retry_at = time.monotonic() + (60 if status == 429 else 15)
+        logger.warning("Embedding service unavailable (code=%s); using local knowledge search", status)
+        return await retrieve_keyword_chunks(db, tenant_id, bot_id, query_text, top_k)
     
+    # Local SQLite supports a small knowledge base without the pgvector extension.
+    if db.get_bind().dialect.name == "sqlite":
+        stmt = (select(DocumentChunk, KnowledgeSource)
+                .join(KnowledgeSource, DocumentChunk.knowledge_source_id == KnowledgeSource.id)
+                .where(DocumentChunk.bot_id == bot_id, DocumentChunk.tenant_id == tenant_id,
+                       KnowledgeSource.tenant_id == tenant_id, DocumentChunk.embedding.is_not(None)))
+        rows = (await db.execute(stmt)).all()
+        query_array = np.asarray(query_vec)
+        scored = []
+        for chunk, doc in rows:
+            vector = np.asarray(chunk.embedding)
+            denominator = np.linalg.norm(vector) * np.linalg.norm(query_array)
+            score = float(np.dot(vector, query_array) / denominator) if denominator else 0.0
+            scored.append((chunk, doc, score))
+        return sorted(scored, key=lambda row: row[2], reverse=True)[:top_k]
+
     # Using pgvector cosine distance operator (<=>)
     distance = DocumentChunk.embedding.cosine_distance(query_vec)
     
@@ -99,7 +228,10 @@ async def stream_grounded_answer(
     db: AsyncSession,
     bot: Bot,
     query: str,
-    conversation_id: str
+    conversation_id: str,
+    *,
+    channel: str = "widget",
+    persist_response: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """Processes visitor query and streams AI answer back via SSE."""
     
@@ -120,10 +252,13 @@ async def stream_grounded_answer(
 
     # Fetch conversation history for context (last 12 messages)
     history_stmt = select(Message).where(
-        Message.conversation_id == conversation_id
+        Message.conversation_id == conversation_id, Message.tenant_id == bot.tenant_id
     ).order_by(Message.created_at.desc()).limit(12)
     history_msgs = (await db.execute(history_stmt)).scalars().all()
     history_msgs.reverse()
+    # The transport saves the current incoming message before invoking the engine.
+    if history_msgs and history_msgs[-1].sender == "visitor" and history_msgs[-1].text_content == query:
+        history_msgs.pop()
 
     try:
         for chunk, doc, score in top_results:
@@ -158,81 +293,29 @@ async def stream_grounded_answer(
             context_str = "\n\n".join(retrieved_contexts)
             
             if settings.DEVELOPMENT_MOCK_AI:
-                full_answer = f"MOCK AI ANSWER: Based on our knowledge base, {retrieved_contexts[0][:100]}..."
+                full_answer = f"MOCK AI ANSWER: Based on our knowledge base, {(retrieved_contexts[0] if retrieved_contexts else 'No knowledge available')[:100]}..."
                 tokens_input = 100
                 tokens_output = 20
                 yield {"type": "chunk", "text": full_answer}
             elif settings.LLM_PROVIDER == "gemini" and settings.GEMINI_API_KEY:
-                system_prompt = (
-                    f"{PERMANENT_SYSTEM_PROMPT}\n\n"
-                    "STRICT GROUNDING RULES:\n"
-                    "1. For factual questions about products/services, answer ONLY using facts from the provided Context below.\n"
-                    "2. If the user asks a factual question and the Context does not contain the answer, reply exactly with: \"I'm sorry, I don't have enough verified information to answer this accurately. Would you like to connect directly with our support team?\"\n"
-                    "3. For conversational replies (like yes/no, contact info, greetings), acknowledge them naturally and continue the sales process using conversation history.\n"
-                    "4. Do NOT make up facts, pricing, or policies.\n\n"
-                    f"Context:\n{context_str}"
-                )
+                system_prompt = build_system_prompt(bot, context_str)
                 try:
                     tokens_input = len(system_prompt.split()) + len(query.split())
-                    
-                    contents = []
-                    for msg in history_msgs:
-                        contents.append({
-                            "role": "user" if msg.sender == "visitor" else "model",
-                            "parts": [{"text": msg.text_content}]
-                        })
-                    contents.append({"role": "user", "parts": [{"text": query}]})
-                    
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.LLM_MODEL}:streamGenerateContent?key={settings.GEMINI_API_KEY}&alt=sse"
-                        payload = {
-                            "contents": contents,
-                            "systemInstruction": {"role": "system", "parts": [{"text": system_prompt}]},
-                            "generationConfig": {"temperature": 0.2}
-                        }
-                        
-                        async with client.stream("POST", url, json=payload) as resp:
-                            if resp.status_code != 200:
-                                fallback_triggered = True
-                                fallback_reason = f"AI API Error: {resp.status_code}"
-                                full_answer = "I am currently unable to process your request due to an AI service error. Would you like to contact support?"
-                                yield {"type": "chunk", "text": full_answer}
-                            else:
-                                async for line in resp.aiter_lines():
-                                    if line.startswith("data: "):
-                                        data_str = line[6:].strip()
-                                        if data_str == "[DONE]":
-                                            break
-                                        if not data_str:
-                                            continue
-                                        try:
-                                            data = json.loads(data_str)
-                                            if "candidates" in data and len(data["candidates"]) > 0:
-                                                candidate = data["candidates"][0]
-                                                if "content" in candidate and "parts" in candidate["content"]:
-                                                    chunk_text = candidate["content"]["parts"][0].get("text", "")
-                                                    if chunk_text:
-                                                        full_answer += chunk_text
-                                                        tokens_output += 1
-                                                        yield {"type": "chunk", "text": chunk_text}
-                                        except Exception:
-                                            pass
-                except Exception:
+                    async for chunk_text in stream_gemini_reply(system_prompt, history_msgs, query):
+                        full_answer += chunk_text
+                        tokens_output += 1
+                        yield {"type": "chunk", "text": chunk_text}
+                except Exception as error:
+                    # Log only the error type/code; SDK exception text may contain credentials.
+                    code = getattr(error, "code", None)
+                    logger.warning("Gemini reply failed (%s, code=%s)", type(error).__name__, code)
                     fallback_triggered = True
-                    fallback_reason = "AI service unavailable"
-                    full_answer = "The AI service is currently unavailable. Please contact our human support team."
+                    fallback_reason = f"AI API Error: {code}" if isinstance(code, int) else "AI service unavailable"
+                    full_answer = bot.fallback_message or "The AI service is currently unavailable. Please contact support."
                     yield {"type": "chunk", "text": full_answer}
-                    
+
             elif settings.LLM_PROVIDER == "openrouter" and settings.OPENROUTER_API_KEY:
-                system_prompt = (
-                    f"{PERMANENT_SYSTEM_PROMPT}\n\n"
-                    "STRICT GROUNDING RULES:\n"
-                    "1. For factual questions about products/services, answer ONLY using facts from the provided Context below.\n"
-                    "2. If the user asks a factual question and the Context does not contain the answer, reply exactly with: \"I'm sorry, I don't have enough verified information to answer this accurately. Would you like to connect directly with our support team?\"\n"
-                    "3. For conversational replies (like yes/no, contact info, greetings), acknowledge them naturally and continue the sales process using conversation history.\n"
-                    "4. Do NOT make up facts, pricing, or policies.\n\n"
-                    f"Context:\n{context_str}"
-                )
+                system_prompt = build_system_prompt(bot, context_str)
                 try:
                     # Approximate input tokens loosely for streaming (OpenRouter streams usually dont send usage in chunks)
                     tokens_input = len(system_prompt.split()) + len(query.split())
@@ -262,9 +345,8 @@ async def stream_grounded_answer(
                         ) as resp:
                             if resp.status_code != 200:
                                 fallback_triggered = True
-                                err_text = await resp.aread()
                                 fallback_reason = "AI service error"
-                                full_answer = f"I am currently unable to process your request due to an AI service error. Status: {resp.status_code}, Body: {err_text.decode('utf-8')}. Would you like to contact support?"
+                                full_answer = bot.fallback_message or "The AI service is unavailable. Please contact support."
                                 yield {"type": "chunk", "text": full_answer}
                             else:
                                 async for line in resp.aiter_lines():
@@ -294,17 +376,19 @@ async def stream_grounded_answer(
                 full_answer = "AI processing is not configured."
                 yield {"type": "chunk", "text": full_answer}
 
+        if not fallback_triggered and "don't have enough verified information" in full_answer:
+            fallback_triggered = True
+            fallback_reason = "Low confidence"
+
         yield {
             "type": "done",
+            "answer": full_answer,
             "citations": citations if not fallback_triggered else [],
             "escalation_links": escalation_links,
             "fallback_triggered": fallback_triggered
         }
 
     finally:
-        if not fallback_triggered and "don't have enough verified information" in full_answer:
-            fallback_triggered = True
-            fallback_reason = "Low confidence"
 
         # Save to database at the end of the generator or on disconnect
         bot_msg = Message(
@@ -315,7 +399,8 @@ async def stream_grounded_answer(
             citations_json=citations if not fallback_triggered else [],
             fallback_triggered=fallback_triggered
         )
-        db.add(bot_msg)
+        if persist_response:
+            db.add(bot_msg)
     
         usage = UsageEvent(
             tenant_id=bot.tenant_id,
@@ -331,7 +416,7 @@ async def stream_grounded_answer(
                 tenant_id=bot.tenant_id,
                 bot_id=bot.id,
                 conversation_id=conversation_id,
-                channel="widget", # general fallback channel
+                channel=channel,
                 reason=fallback_reason,
                 status="pending"
             )

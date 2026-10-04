@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
     RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
 
+    # Shared only between FastAPI and the local WhatsApp connector.
+    WHATSAPP_CONNECTOR_URL: str = "http://127.0.0.1:3101"
+    WHATSAPP_CONNECTOR_TOKEN: str = ""
+
     model_config = SettingsConfigDict(case_sensitive=True, env_file=".env", extra="ignore")
 
     @model_validator(mode='after')

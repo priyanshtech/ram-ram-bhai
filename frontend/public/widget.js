@@ -364,13 +364,15 @@
       
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
+      let pending = '';
       
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         
-        const chunkStr = decoder.decode(value, { stream: true });
-        const lines = chunkStr.split('\n\n');
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split('\n\n');
+        pending = lines.pop();
         
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -381,7 +383,12 @@
               if (data.type === 'chunk' && data.text) {
                 botMsgDiv.dataset.fullText += data.text;
                 botMsgDiv.innerHTML = parseMarkdown(botMsgDiv.dataset.fullText);
-              } else if (data.type === 'done' && data.escalation_links && Object.keys(data.escalation_links).length > 0) {
+              } else if (data.type === 'done') {
+                 if (typeof data.answer === 'string') {
+                   botMsgDiv.dataset.fullText = data.answer;
+                   botMsgDiv.innerHTML = parseMarkdown(data.answer);
+                 }
+                 if (!data.escalation_links || Object.keys(data.escalation_links).length === 0) continue;
                  // Render escalation links
                  const escDiv = document.createElement('div');
                  escDiv.className = 'ai-escalation-links';

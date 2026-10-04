@@ -66,6 +66,17 @@ async function fetchWithAuth(endpoint, options = {}) {
 }
 
 export const api = {
+  getWhatsAppAccount: (tenant_id) => fetchWithAuth(`/whatsapp/account?tenant_id=${encodeURIComponent(tenant_id)}`),
+  configureWhatsApp: (tenant_id, data) => fetchWithAuth(`/whatsapp/account?tenant_id=${encodeURIComponent(tenant_id)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data)
+  }),
+  connectWhatsApp: (tenant_id) => fetchWithAuth(`/whatsapp/connect?tenant_id=${encodeURIComponent(tenant_id)}`, { method: "POST" }),
+  disconnectWhatsApp: (tenant_id) => fetchWithAuth(`/whatsapp/disconnect?tenant_id=${encodeURIComponent(tenant_id)}`, { method: "POST" }),
+  logoutWhatsApp: (tenant_id) => fetchWithAuth(`/whatsapp/logout?tenant_id=${encodeURIComponent(tenant_id)}`, { method: "POST" }),
+  getWhatsAppChats: (tenant_id) => fetchWithAuth(`/whatsapp/chats?tenant_id=${encodeURIComponent(tenant_id)}`),
+  toggleWhatsAppChat: (tenant_id, chat_id, enabled) => fetchWithAuth(`/whatsapp/chats/${encodeURIComponent(chat_id)}?tenant_id=${encodeURIComponent(tenant_id)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled })
+  }),
   signup: (data) => fetchWithAuth("/auth/signup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

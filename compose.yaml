@@ -1,0 +1,139 @@
+name: konvertai-local
+
+x-backend-environment: &backend-environment
+  ENVIRONMENT: development
+  DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+asyncpg://konvertai:konvertai-local@postgres:5432/konvertai}
+  REDIS_URL: redis://redis:6379/0
+  FRONTEND_ORIGINS: http://localhost:3000
+  WHATSAPP_CONNECTOR_URL: http://whatsapp:3101
+  WHATSAPP_CONNECTOR_TOKEN: ${WHATSAPP_CONNECTOR_TOKEN:?Run the Docker setup script first}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: konvertai
+      POSTGRES_PASSWORD: konvertai-local
+      POSTGRES_DB: konvertai
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U konvertai -d konvertai"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    image: konvertai-local-backend
+    pull_policy: never
+    env_file: ./backend/.env
+    environment: *backend-environment
+    command: [python, -m, alembic, upgrade, head]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    image: konvertai-local-backend
+    build: ./backend
+    env_file: ./backend/.env
+    environment: *backend-environment
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    init: true
+    restart: unless-stopped
+
+  worker:
+    image: konvertai-local-backend
+    pull_policy: never
+    env_file: ./backend/.env
+    environment: *backend-environment
+    command: [python, -m, arq, app.workers.ingestion_worker.WorkerSettings]
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      backend:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+
+  whatsapp:
+    build: ./whatsapp-connector
+    environment:
+      WHATSAPP_CONNECTOR_TOKEN: ${WHATSAPP_CONNECTOR_TOKEN:?Run the Docker setup script first}
+      BACKEND_URL: http://backend:8000/api/v1
+      HOST: 0.0.0.0
+      PORT: "3101"
+      AUTH_DIR: /app/sessions
+    volumes:
+      - whatsapp-sessions:/app/sessions
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3101/accounts/00000000-0000-0000-0000-000000000000', {headers: {Authorization: 'Bearer ' + process.env.WHATSAPP_CONNECTOR_TOKEN}}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    init: true
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+        NEXT_PUBLIC_WIDGET_API_URL: http://127.0.0.1:8000/api/v1
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:?Missing Supabase URL in frontend/.env.local}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:?Missing Supabase public key in frontend/.env.local}
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      NODE_ENV: production
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    init: true
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  uploads:
+  whatsapp-sessions:

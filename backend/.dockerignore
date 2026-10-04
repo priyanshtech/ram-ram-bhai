@@ -1,0 +1,14 @@
+.env*
+venv
+.venv
+__pycache__
+**/__pycache__
+*.db
+*.sqlite*
+.pytest_cache
+.ruff_cache
+uploads
+session.json
+test*.py
+check*.py
+db*.py

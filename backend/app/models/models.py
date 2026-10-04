@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -147,6 +148,7 @@ class Conversation(Base):
     visitor_email = Column(String, nullable=True)
     visitor_phone = Column(String, nullable=True)
     status = Column(String, default="active")  # active, escalated, closed
+    channel = Column(String, nullable=False, default="widget", server_default="widget")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     bot = relationship("Bot", back_populates="conversations")
@@ -214,3 +216,53 @@ class UsageEvent(Base):
     tokens_input = Column(Integer, default=0)
     tokens_output = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+
+
+class WhatsAppAccount(Base):
+    __tablename__ = "whatsapp_accounts"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, unique=True)
+    bot_id = Column(String, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    connect_requested = Column(Boolean, nullable=False, default=False)
+    paused = Column(Boolean, nullable=False, default=False)
+    revision = Column(Integer, nullable=False, default=0)
+    changed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+
+
+class WhatsAppChat(Base):
+    __tablename__ = "whatsapp_chats"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    account_id = Column(String, ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False, default="")
+    phone = Column(String, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    revision = Column(Integer, nullable=False, default=0)
+    changed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    last_message_at = Column(DateTime, nullable=True)
+    identities = relationship("WhatsAppIdentity", cascade="all, delete-orphan", lazy="selectin")
+
+
+class WhatsAppIdentity(Base):
+    __tablename__ = "whatsapp_identities"
+    __table_args__ = (UniqueConstraint("account_id", "jid", name="uq_whatsapp_identity"),)
+    id = Column(String, primary_key=True, default=generate_uuid)
+    account_id = Column(String, ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"), nullable=False)
+    chat_id = Column(String, ForeignKey("whatsapp_chats.id", ondelete="CASCADE"), nullable=False, index=True)
+    jid = Column(String, nullable=False)
+
+
+class WhatsAppReceipt(Base):
+    __tablename__ = "whatsapp_receipts"
+    __table_args__ = (UniqueConstraint("account_id", "message_id", name="uq_whatsapp_message"),)
+    id = Column(String, primary_key=True, default=generate_uuid)
+    account_id = Column(String, ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"), nullable=False)
+    chat_id = Column(String, ForeignKey("whatsapp_chats.id", ondelete="CASCADE"), nullable=False)
+    message_id = Column(String, nullable=False)
+    conversation_id = Column(String, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True)
+    account_revision = Column(Integer, nullable=False)
+    chat_revision = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="processing")
+    reply = Column(Text, nullable=True)
+    citations_json = Column(JSON, nullable=True)
+    fallback_triggered = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))

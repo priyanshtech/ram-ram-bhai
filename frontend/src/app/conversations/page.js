@@ -166,7 +166,7 @@ export default function ConversationsPage() {
                   >
                     <div className="flex items-center justify-between mb-2">
                       <span className={`font-semibold text-sm ${isSelected ? 'text-zinc-900 dark:text-white' : 'text-zinc-700 dark:text-zinc-200'}`}>
-                        Visitor {c.visitor_session_id ? c.visitor_session_id.substring(0,8) : 'Unknown'}
+                        {c.visitor_name || `Visitor ${c.visitor_session_id ? c.visitor_session_id.substring(0,8) : 'Unknown'}`} {c.channel === 'whatsapp' && <span className="text-[10px] text-emerald-600">WhatsApp</span>}
                       </span>
                       <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium border ${
                         c.status === 'escalated'
@@ -216,7 +216,7 @@ export default function ConversationsPage() {
                     </button>
                     <div>
                       <h3 className="font-semibold text-zinc-900 dark:text-zinc-50 text-base">
-                        Visitor {selectedConv.visitor_session_id ? selectedConv.visitor_session_id.substring(0,8) : 'Unknown'}
+                        {selectedConv.visitor_name || `Visitor ${selectedConv.visitor_session_id ? selectedConv.visitor_session_id.substring(0,8) : 'Unknown'}`}
                       </h3>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                         Started on {new Date(selectedConv.created_at).toLocaleString()}

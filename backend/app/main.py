@@ -4,7 +4,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, bots, chat, dashboard, knowledge, widget
+from app.api import auth, bots, chat, dashboard, knowledge, whatsapp, widget
 from app.core.config import settings
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -47,6 +47,7 @@ app.include_router(knowledge.router, prefix=settings.API_V1_STR)
 app.include_router(dashboard.router, prefix=settings.API_V1_STR)
 app.include_router(widget.router, prefix=settings.API_V1_STR)
 app.include_router(chat.router, prefix=settings.API_V1_STR)
+app.include_router(whatsapp.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 async def root():

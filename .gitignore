@@ -61,3 +61,7 @@ uploads/
 # Coverage
 .coverage
 htmlcov/
+
+# WhatsApp credentials and compiled connector
+whatsapp-connector/sessions/
+whatsapp-connector/dist/

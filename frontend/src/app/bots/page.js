@@ -9,6 +9,19 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 
+
+function getWidgetApiHost() {
+  const configuredHost = process.env.NEXT_PUBLIC_WIDGET_API_URL
+    || process.env.NEXT_PUBLIC_API_URL
+    || "http://127.0.0.1:8000/api/v1";
+  const normalizedHost = configuredHost.replace(/\/+$/, "");
+  return normalizedHost.endsWith("/api/v1") ? normalizedHost : `${normalizedHost}/api/v1`;
+}
+
+function getEmbedCode(origin, publicKey) {
+  return `<script src="${origin}/widget.js" data-bot-id="${publicKey}" data-api-host="${getWidgetApiHost()}" defer></script>`;
+}
+
 export default function BotConfigPage() {
   const router = useRouter();
   const [bot, setBot] = useState({
@@ -112,7 +125,7 @@ export default function BotConfigPage() {
   };
 
   const copyEmbedCode = () => {
-    const code = `<script src="${window.location.origin}/widget.js" data-bot-id="${botIdForEmbed}" defer></script>`;
+    const code = getEmbedCode(window.location.origin, botIdForEmbed);
     navigator.clipboard.writeText(code);
     alert("Embed code copied to clipboard!");
   };
@@ -284,7 +297,7 @@ export default function BotConfigPage() {
                     <p className="text-xs text-zinc-500">Paste this script before the closing <code>&lt;/body&gt;</code> tag of your website.</p>
                     <div className="bg-zinc-950 rounded-lg p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border border-zinc-800">
                       <code className="text-xs text-emerald-400 font-mono break-all leading-relaxed">
-                        &lt;script src="{typeof window !== 'undefined' ? window.location.origin : ''}/widget.js" data-bot-id="{botIdForEmbed}" defer&gt;&lt;/script&gt;
+                        {getEmbedCode(typeof window !== "undefined" ? window.location.origin : "", botIdForEmbed)}
                       </code>
                       <Button onClick={copyEmbedCode} size="sm" className="shrink-0 bg-white text-black hover:bg-zinc-200 shadow-none">
                         Copy

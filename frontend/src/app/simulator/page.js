@@ -89,13 +89,15 @@ export default function SimulatorPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let done = false;
+      let pending = "";
 
       while (!done) {
         const { value, done: readerDone } = await reader.read();
         done = readerDone;
         if (value) {
-          const chunkString = decoder.decode(value, { stream: true });
-          const lines = chunkString.split("\n");
+          pending += decoder.decode(value, { stream: true });
+          const lines = pending.split("\n");
+          pending = lines.pop();
           for (const line of lines) {
             if (line.startsWith("data: ")) {
               const dataStr = line.slice(6).trim();
@@ -103,13 +105,16 @@ export default function SimulatorPage() {
               try {
                 const data = JSON.parse(dataStr);
                 
+                if (data.type === "error") throw new Error(data.message || "AI request failed");
+
                 setMessages((prev) => prev.map((msg) => {
                   if (msg.id === botMsgId) {
                     if (data.type === "chunk" && data.text) {
                       return { ...msg, text: msg.text + data.text };
                     } else if (data.type === "done") {
                       return { 
-                        ...msg, 
+                        ...msg,
+                        text: data.answer ?? msg.text,
                         citations: data.citations || [], 
                         fallback: data.fallback_triggered || false 
                       };
@@ -118,7 +123,8 @@ export default function SimulatorPage() {
                   return msg;
                 }));
               } catch (e) {
-                console.error("Error parsing SSE chunk", dataStr, e);
+                if (!(e instanceof SyntaxError)) throw e;
+                console.error("Error parsing SSE chunk", e);
               }
             }
           }

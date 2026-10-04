@@ -13,6 +13,7 @@ import {
   Menu,
   X,
   MessageSquare,
+  Smartphone,
   ChevronLeft,
   ChevronRight
 } from "lucide-react";
@@ -97,6 +98,7 @@ export default function Sidebar() {
   const mainNavItems = [
     { name: "Overview", href: "/dashboard", icon: LayoutDashboard },
     { name: "Conversations", href: "/conversations", icon: MessageSquare },
+    { name: "WhatsApp", href: "/whatsapp", icon: Smartphone },
     { name: "Knowledge Base", href: "/knowledge", icon: BookOpen },
     { name: "AI Configuration", href: "/bots", icon: Bot },
     { name: "Simulator", href: "/simulator", icon: PlayCircle },
