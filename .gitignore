@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+
+# Uploads
+uploads/
+
+# Alembic
+alembic/versions/*.pyc
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Node
+node_modules/
+
+# Next.js build output
+frontend/.next/
+
+# React build
+frontend/dist/
+frontend/.vite/
+
+# Local environment and credential files
+.env
+.env.*
+!.env.example
+
+# Local databases and session state
+*.db
+*.sqlite
+*.sqlite3
+backend/session.json
+
+# Python bytecode and cache directories
+**/__pycache__/
+*.py[cod]
+
+# Uploaded user data
+uploads/
+
+# Coverage
+.coverage
+htmlcov/
